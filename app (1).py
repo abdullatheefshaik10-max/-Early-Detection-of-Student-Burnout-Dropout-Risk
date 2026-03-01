@@ -425,6 +425,76 @@ if page == "📊 Overview & EDA":
     st.pyplot(fig)
     plt.close()
 
+    # ── Student Records Table ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🗂️ Student Records")
+
+    # Filters row
+    fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
+    with fc1:
+        risk_filter_eda = st.selectbox("Filter by Risk", ["All", "Low", "Medium", "High", "Critical"], key="eda_risk")
+    with fc2:
+        program_filter = st.selectbox("Filter by Program", ["All"] + sorted(df['program'].unique().tolist()), key="eda_prog")
+    with fc3:
+        dropout_filter = st.selectbox("Dropout Status", ["All", "Dropout", "No Dropout"], key="eda_drop")
+    with fc4:
+        n_rows = st.slider("Rows to show", 10, 100, 25, key="eda_rows")
+
+    # Apply filters
+    view_df = df.copy()
+    if risk_filter_eda != "All":
+        view_df = view_df[view_df['risk_category'] == risk_filter_eda]
+    if program_filter != "All":
+        view_df = view_df[view_df['program'] == program_filter]
+    if dropout_filter == "Dropout":
+        view_df = view_df[view_df['dropout_label'] == 1]
+    elif dropout_filter == "No Dropout":
+        view_df = view_df[view_df['dropout_label'] == 0]
+
+    # Display columns
+    display_cols = [
+        'student_id', 'program', 'semester', 'gender', 'age',
+        'risk_category', 'risk_score', 'dropout_probability',
+        'current_gpa', 'attendance_pct_week12',
+        'lms_logins_week12', 'late_submission_pct',
+        'feedback_sentiment_score', 'consecutive_absences',
+        'peer_interaction_score', 'recommended_intervention',
+        'dropout_label'
+    ]
+
+    table_df = view_df[display_cols].head(n_rows).copy()
+    table_df['dropout_probability'] = (table_df['dropout_probability'] * 100).round(1).astype(str) + '%'
+    table_df['late_submission_pct'] = (table_df['late_submission_pct'] * 100).round(1).astype(str) + '%'
+    table_df['attendance_pct_week12'] = table_df['attendance_pct_week12'].round(1).astype(str) + '%'
+    table_df['risk_score'] = table_df['risk_score'].round(1)
+    table_df['dropout_label'] = table_df['dropout_label'].map({1: '⚠️ Yes', 0: '✅ No'})
+    table_df.columns = [
+        'Student ID', 'Program', 'Sem', 'Gender', 'Age',
+        'Risk Level', 'Risk Score', 'Dropout Prob',
+        'GPA', 'Attendance W12',
+        'LMS Logins W12', 'Late Sub %',
+        'Sentiment', 'Consec. Absences',
+        'Peer Score', 'Recommended Intervention',
+        'Dropout'
+    ]
+
+    st.caption(f"Showing {len(table_df)} of {len(view_df):,} filtered students ({len(df):,} total)")
+    st.dataframe(
+        table_df,
+        hide_index=True,
+        use_container_width=True,
+        height=420,
+        column_config={
+            "Risk Level": st.column_config.TextColumn("Risk Level"),
+            "Risk Score": st.column_config.ProgressColumn("Risk Score", min_value=0, max_value=100, format="%.1f"),
+            "Dropout": st.column_config.TextColumn("Dropout"),
+        }
+    )
+
+    csv_export = view_df[display_cols].to_csv(index=False)
+    st.download_button("📥 Export filtered records (CSV)", csv_export,
+                       file_name="filtered_students.csv", mime="text/csv")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE 2: TEMPORAL ANALYSIS
@@ -634,66 +704,194 @@ elif page == "🔬 SHAP Explainability":
 # PAGE 6: STUDENT RISK PROFILER
 # ──────────────────────────────────────────────────────────────────────────────
 elif page == "👤 Student Risk Profiler":
-    st.header("👤 Individual Student Risk Profiler")
+    st.header("👤 Student Risk Profiles")
+    st.caption("Full behavioural profile, SHAP triggers & recommended intervention — one card per student.")
 
-    risk_color_map = {"Low": "🟢", "Medium": "🟡", "High": "🟠", "Critical": "🔴"}
-    risk_badge_color = {"Low": "green", "Medium": "orange", "High": "orangered", "Critical": "red"}
+    RISK_ICON  = {"Low": "🟢", "Medium": "🟡", "High": "🟠", "Critical": "🔴"}
+    RISK_COLOR = {"Low": "#22C55E", "Medium": "#F59E0B", "High": "#F97316", "Critical": "#EF4444"}
+    RISK_BG    = {"Low": "#052e16", "Medium": "#451a03", "High": "#431407", "Critical": "#450a0a"}
 
-    col_left, col_right = st.columns([1, 2])
+    # ── Filters ────────────────────────────────────────────────────────────────
+    st.markdown("### 🔎 Filter Students")
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        risk_filter_p = st.selectbox("Risk Level", ["All", "Low", "Medium", "High", "Critical"], key="prof_risk")
+    with fc2:
+        prog_filter_p = st.selectbox("Program", ["All"] + sorted(df["program"].unique().tolist()), key="prof_prog")
+    with fc3:
+        dropout_filter_p = st.selectbox("Dropout", ["All", "Dropout Only", "No Dropout"], key="prof_drop")
+    with fc4:
+        n_cards = st.slider("Number of profiles", 1, 8, 4, key="prof_n")
 
-    with col_left:
-        st.subheader("Select Student")
-        risk_filter = st.selectbox("Filter by Risk Level", ["All", "Low", "Medium", "High", "Critical"])
-        if risk_filter != "All":
-            filtered_ids = df[df['risk_category'] == risk_filter]['student_id'].tolist()
-        else:
-            filtered_ids = df['student_id'].tolist()
+    pool = df.copy()
+    if risk_filter_p != "All":
+        pool = pool[pool["risk_category"] == risk_filter_p]
+    if prog_filter_p != "All":
+        pool = pool[pool["program"] == prog_filter_p]
+    if dropout_filter_p == "Dropout Only":
+        pool = pool[pool["dropout_label"] == 1]
+    elif dropout_filter_p == "No Dropout":
+        pool = pool[pool["dropout_label"] == 0]
 
-        student_id = st.selectbox("Student ID", filtered_ids[:200])
-        row = df[df['student_id'] == student_id].iloc[0]
-        cat = row['risk_category']
-        icon = risk_color_map.get(cat, "❓")
+    # Pick one from each risk tier first to ensure variety, then fill remainder
+    sample_rows = []
+    for tier in ["Critical", "High", "Medium", "Low"]:
+        tier_pool = pool[pool["risk_category"] == tier]
+        if not tier_pool.empty:
+            sample_rows.append(tier_pool.iloc[0])
+    already = [r["student_id"] for r in sample_rows]
+    remainder = pool[~pool["student_id"].isin(already)]
+    extra = min(max(n_cards - len(sample_rows), 0), len(remainder))
+    if extra > 0:
+        sample_rows += [remainder.iloc[i] for i in range(extra)]
+    sample_rows = sample_rows[:n_cards]
 
-        st.markdown(f"### {icon} {student_id}")
-        st.markdown(f"**Program:** {row['program']}  |  Semester {int(row['semester'])}")
-        st.markdown(f"**Risk Category:** `{cat}`")
-        st.markdown(f"**Risk Score:** {row['risk_score']:.1f} / 100")
-        st.markdown(f"**Dropout Probability:** {row['dropout_probability']*100:.1f}%")
-        st.progress(float(row['risk_score']) / 100)
-        st.markdown(f"**Recommended Intervention:**")
-        st.info(row['recommended_intervention'])
+    if not sample_rows:
+        st.warning("No students match the selected filters.")
+    else:
+        st.markdown(f"**Showing {len(sample_rows)} student profile(s)**")
+        st.markdown("---")
 
-    with col_right:
-        st.subheader("Behavioural Signals")
-        signals = {
-            "LMS Logins (Week 12)": f"{int(row['lms_logins_week12'])} / week",
-            "Session Duration (Week 12)": f"{row['avg_session_mins_week12']:.0f} mins",
-            "Attendance (Week 12)": f"{row['attendance_pct_week12']:.1f}%",
-            "Late Submission %": f"{row['late_submission_pct']*100:.0f}%",
-            "Sentiment Score (Week 12)": f"{row['feedback_sentiment_score']:.3f}",
-            "Consecutive Absences": f"{int(row['consecutive_absences'])}",
-            "Peer Interaction Score": f"{int(row['peer_interaction_score'])} / 25",
-            "Current GPA": f"{row['current_gpa']:.2f}",
-            "Prior GPA": f"{row['prior_gpa']:.2f}",
-            "Academic Momentum": f"{row['academic_momentum_index']:.3f}",
-            "Social Isolation": f"{row['social_isolation_score']:.3f}",
-            "Frustration Index": f"{row['frustration_index']:.3f}",
-        }
-        sig_df = pd.DataFrame(list(signals.items()), columns=["Signal", "Value"])
-        st.dataframe(sig_df, hide_index=True, use_container_width=True)
+        # Pre-compute SHAP for all selected students in one batch
+        stu_ids = [r["student_id"] for r in sample_rows]
+        X_batch = df[df["student_id"].isin(stu_ids)].set_index("student_id")[feature_cols]
+        X_batch = X_batch.loc[stu_ids]  # preserve order
+        with st.spinner("Computing SHAP values..."):
+            shap_batch = explainer.shap_values(X_batch.values)
 
-        st.subheader("Top SHAP Triggers")
-        with st.spinner("Computing SHAP for this student..."):
-            X_stu = df[df['student_id'] == student_id][feature_cols]
-            shap_vals_stu = explainer.shap_values(X_stu)[0]
-            shap_series = pd.Series(shap_vals_stu, index=feature_cols)
-            top_shap = shap_series.abs().sort_values(ascending=False).head(8)
-        shap_display = pd.DataFrame({
-            "Feature": top_shap.index,
-            "Direction": ["↑ RISK" if shap_vals_stu[feature_cols.index(f)] > 0 else "↓ RISK" for f in top_shap.index],
-            "|SHAP Value|": top_shap.values.round(4)
-        })
-        st.dataframe(shap_display, hide_index=True, use_container_width=True)
+        for idx, row in enumerate(sample_rows):
+            cat   = row["risk_category"]
+            icon  = RISK_ICON[cat]
+            color = RISK_COLOR[cat]
+            bg    = RISK_BG[cat]
+            shap_vals_stu = shap_batch[idx]
+            shap_series   = pd.Series(shap_vals_stu, index=feature_cols)
+            top5          = shap_series.abs().sort_values(ascending=False).head(5)
+
+            # ── Card header ────────────────────────────────────────────────────
+            st.markdown(
+                f"""<div style="background:{bg}; border:2px solid {color};
+                    border-radius:12px; padding:16px 22px 4px 22px; margin-bottom:4px;">
+                <h3 style="color:{color}; margin:0 0 2px 0; font-family:monospace;">
+                    {icon} &nbsp; STUDENT RISK PROFILE — {row["student_id"]}
+                </h3>
+                <hr style="border-color:{color}; opacity:0.35; margin:8px 0 4px 0;">
+                </div>""", unsafe_allow_html=True)
+
+            col_a, col_b, col_c = st.columns([1.1, 1.2, 1.25])
+
+            # ── Column A: Identity & Risk Summary ─────────────────────────────
+            with col_a:
+                dropout_color = "#ef4444" if row["dropout_label"] == 1 else "#22c55e"
+                dropout_text  = "⚠️ YES — At Risk" if row["dropout_label"] == 1 else "✅ NO — Stable"
+                st.markdown(
+                    f"""<div style="background:{bg}; border:1px solid {color}44;
+                        border-radius:10px; padding:16px 18px; min-height:340px;">
+                    <p style="color:#94a3b8; font-size:0.78em; margin:0 0 10px 0; text-transform:uppercase;
+                        letter-spacing:0.08em;">Identity & Risk</p>
+                    <p style="margin:5px 0; color:#e2e8f0;"><b>Program:</b><br>
+                        <span style="color:#f1f5f9;">{row["program"]}</span></p>
+                    <p style="margin:5px 0; color:#e2e8f0;"><b>Semester / Age:</b>
+                        <span style="color:#f1f5f9;"> {int(row["semester"])} &nbsp;|&nbsp; {int(row["age"])} yrs</span></p>
+                    <p style="margin:5px 0; color:#e2e8f0;"><b>Gender:</b>
+                        <span style="color:#f1f5f9;"> {row["gender"]}</span></p>
+                    <hr style="border-color:#334155; margin:10px 0;">
+                    <p style="margin:6px 0;"><b style="color:#94a3b8;">Risk Category</b><br>
+                        <span style="color:{color}; font-size:1.2em; font-weight:700;">
+                        {icon} {cat}</span></p>
+                    <p style="margin:6px 0;"><b style="color:#94a3b8;">Risk Score</b><br>
+                        <span style="color:{color}; font-size:1.5em; font-weight:800;">
+                        {row["risk_score"]:.1f}</span>
+                        <span style="color:#64748b;"> / 100</span></p>
+                    <p style="margin:6px 0;"><b style="color:#94a3b8;">Dropout Probability</b><br>
+                        <span style="color:{color}; font-size:1.3em; font-weight:700;">
+                        {row["dropout_probability"]*100:.1f}%</span></p>
+                    <p style="margin:6px 0;"><b style="color:#94a3b8;">Dropout Label</b><br>
+                        <span style="color:{dropout_color}; font-weight:600;">{dropout_text}</span></p>
+                    <hr style="border-color:#334155; margin:10px 0;">
+                    <p style="margin:4px 0; color:#cbd5e1; font-size:0.85em;">
+                        Scholarship: {"✅" if row["scholarship"]==1 else "❌"} &nbsp;|&nbsp;
+                        Part-time: {"✅" if row["part_time_job"]==1 else "❌"} &nbsp;|&nbsp;
+                        First-Gen: {"✅" if row["first_generation_student"]==1 else "❌"}</p>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── Column B: Behavioural Signals ─────────────────────────────────
+            with col_b:
+                rows_html = ""
+                signals = [
+                    ("LMS Logins W12",       f"{int(row['lms_logins_week12'])} / week"),
+                    ("Session Duration W12",  f"{row['avg_session_mins_week12']:.0f} mins"),
+                    ("Attendance W12",        f"{row['attendance_pct_week12']:.1f}%"),
+                    ("Late Submissions",      f"{row['late_submission_pct']*100:.0f}%"),
+                    ("Sentiment Score W12",   f"{row['feedback_sentiment_score']:.3f}"),
+                    ("Consecutive Absences",  f"{int(row['consecutive_absences'])}"),
+                    ("Peer Interaction",      f"{int(row['peer_interaction_score'])} / 25"),
+                    ("Current GPA",           f"{row['current_gpa']:.2f}  (Prior: {row['prior_gpa']:.2f})"),
+                    ("Midterm Score",         f"{row['midterm_score']:.1f} / 100"),
+                    ("Quiz Avg",              f"{row['quiz_avg']:.1f} / 100"),
+                    ("Academic Momentum",     f"{row['academic_momentum_index']:.3f}"),
+                    ("Social Isolation",      f"{row['social_isolation_score']:.3f}"),
+                    ("Frustration Index",     f"{row['frustration_index']:.3f}"),
+                    ("Forum Posts",           f"{int(row['forum_posts'])}"),
+                ]
+                for i, (label, val) in enumerate(signals):
+                    bg_row = "#ffffff08" if i % 2 == 0 else "transparent"
+                    rows_html += f"""<tr style="background:{bg_row};">
+                        <td style="padding:4px 8px; color:#94a3b8; font-size:0.84em;">{label}</td>
+                        <td style="padding:4px 8px; color:{color}; font-weight:600;
+                            font-size:0.88em;">{val}</td></tr>"""
+                st.markdown(
+                    f"""<div style="background:{bg}; border:1px solid {color}44;
+                        border-radius:10px; padding:16px 18px;">
+                    <p style="color:#94a3b8; font-size:0.78em; margin:0 0 10px 0; text-transform:uppercase;
+                        letter-spacing:0.08em;">── Behavioural Signals ──</p>
+                    <table style="width:100%; border-collapse:collapse;">{rows_html}</table>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── Column C: SHAP Triggers + Intervention ─────────────────────────
+            with col_c:
+                shap_rows_html = ""
+                for i, feat in enumerate(top5.index):
+                    direction  = shap_series[feat] > 0
+                    arrow      = "↑" if direction else "↓"
+                    arr_color  = "#ef4444" if direction else "#22c55e"
+                    risk_label = "↑ RISK" if direction else "↓ RISK"
+                    bg_row     = "#ffffff08" if i % 2 == 0 else "transparent"
+                    shap_rows_html += f"""<tr style="background:{bg_row};">
+                        <td style="padding:5px 6px; font-family:monospace; font-size:0.8em;
+                            color:#e2e8f0; max-width:150px; overflow:hidden; text-overflow:ellipsis;
+                            white-space:nowrap;">{feat}</td>
+                        <td style="padding:5px 6px; color:{arr_color}; font-weight:700;
+                            white-space:nowrap; font-size:0.88em;">{risk_label}</td>
+                        <td style="padding:5px 6px; color:#94a3b8; font-size:0.8em;
+                            white-space:nowrap;">|{abs(shap_series[feat]):.4f}|</td>
+                    </tr>"""
+
+                interv = row["recommended_intervention"]
+                interv_color = (
+                    "#ef4444" if "Emergency" in interv else
+                    "#f97316" if "Mandatory" in interv else
+                    "#f59e0b" if "Proactive" in interv or "Mental" in interv else
+                    "#3b82f6" if "Peer" in interv or "Study" in interv else
+                    "#22c55e"
+                )
+                st.markdown(
+                    f"""<div style="background:{bg}; border:1px solid {color}44;
+                        border-radius:10px; padding:16px 18px;">
+                    <p style="color:#94a3b8; font-size:0.78em; margin:0 0 10px 0; text-transform:uppercase;
+                        letter-spacing:0.08em;">── Top 5 SHAP Triggers ──</p>
+                    <table style="width:100%; border-collapse:collapse;">{shap_rows_html}</table>
+                    <hr style="border-color:#334155; margin:16px 0 12px 0;">
+                    <p style="color:#94a3b8; font-size:0.78em; margin:0 0 10px 0; text-transform:uppercase;
+                        letter-spacing:0.08em;">── Recommended Intervention ──</p>
+                    <div style="background:{interv_color}1a; border-left:4px solid {interv_color};
+                        border-radius:0 8px 8px 0; padding:12px 14px;">
+                      <p style="color:#f1f5f9; margin:0; font-size:0.88em; line-height:1.6em;">
+                        ▶ &nbsp; {interv}</p>
+                    </div>
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-bottom:32px;'></div>", unsafe_allow_html=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
